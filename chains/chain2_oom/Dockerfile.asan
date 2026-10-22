@@ -1,0 +1,47 @@
+# Build PHP with AddressSanitizer to observe CVE-2026-109618 heap UAF
+#
+# Usage:
+#   docker build -f Dockerfile.asan -t php-asan .
+#   docker run --rm php-asan
+#
+# Expected output: ASAN reports heap-use-after-free in php_var_unserialize
+# at var_unserializer.c:851, freed at var_destroy (var_unserializer.c:245).
+
+FROM debian:bookworm-slim AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential autoconf bison re2c pkg-config \
+    libxml2-dev libsqlite3-dev zlib1g-dev \
+    curl ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+ARG PHP_VERSION=8.4.26
+ARG PHP_URL=https://www.php.net/distributions/php-${PHP_VERSION}.tar.gz
+
+WORKDIR /build
+RUN curl -fSL "${PHP_URL}" -o php.tar.gz && tar xzf php.tar.gz
+
+WORKDIR /build/php-${PHP_VERSION}
+RUN CC=gcc CFLAGS="-fsanitize=address -fno-omit-frame-pointer -g -O1" \
+    LDFLAGS="-fsanitize=address" \
+    ./configure \
+        --enable-debug \
+        --disable-all \
+        --enable-session \
+        --enable-filter \
+        --with-zlib \
+        --disable-cgi \
+        --disable-phpdbg && \
+    make -j$(nproc)
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libxml2 libsqlite3-0 zlib1g libasan8 && \
+    rm -rf /var/lib/apt/lists/*
+COPY --from=builder /build/php-${PHP_VERSION}/sapi/cli/php /usr/local/bin/php
+COPY verify_uaf.php /verify_uaf.php
+
+ENV USE_ZEND_ALLOC=0
+ENV ASAN_OPTIONS=detect_leaks=0
+
+CMD ["php", "/verify_uaf.php"]

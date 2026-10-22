@@ -1,0 +1,17 @@
+# CVE-2026-109618/109619 -- Detect PHP_SESSION_UPLOAD_PROGRESS abuse
+#
+# These rules detect the session injection primitive: multipart POST
+# requests containing PHP_SESSION_UPLOAD_PROGRESS with suspicious
+# filenames (PHP code in filename field).
+#
+# Tune thresholds for your environment. Legitimate file uploads with
+# PHP_SESSION_UPLOAD_PROGRESS are uncommon outside progress-bar UIs.
+
+# Alert on PHP code in multipart filename (session injection attempt)
+alert http any any -> any any (msg:"CVE-2026-109618 PHP code in multipart filename"; flow:established,to_server; content:"POST"; http_method; content:"multipart/form-data"; http_header; content:"PHP_SESSION_UPLOAD_PROGRESS"; http_client_body; content:"<?php"; http_client_body; reference:cve,2026-109618; classtype:web-application-attack; sid:2026109618; rev:1;)
+
+# Alert on short PHP tags in multipart filename
+alert http any any -> any any (msg:"CVE-2026-109618 Short PHP tag in multipart filename"; flow:established,to_server; content:"POST"; http_method; content:"multipart/form-data"; http_header; content:"PHP_SESSION_UPLOAD_PROGRESS"; http_client_body; content:"<?="; http_client_body; reference:cve,2026-109618; classtype:web-application-attack; sid:2026109619; rev:1;)
+
+# Alert on high-frequency multipart uploads to same endpoint (race condition)
+alert http any any -> any any (msg:"CVE-2026-109618 Rapid multipart upload (possible race)"; flow:established,to_server; content:"POST"; http_method; content:"multipart/form-data"; http_header; content:"PHP_SESSION_UPLOAD_PROGRESS"; http_client_body; threshold:type both,track by_src,count 10,seconds 5; reference:cve,2026-109618; classtype:web-application-attack; sid:2026109620; rev:1;)

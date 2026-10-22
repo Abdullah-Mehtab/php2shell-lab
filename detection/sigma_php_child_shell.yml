@@ -1,0 +1,49 @@
+title: PHP-FPM Spawns Shell Process (php2shell Indicator)
+id: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+status: experimental
+description: |
+  Detects PHP-FPM (or mod_php) spawning shell processes, which may indicate
+  successful exploitation of CVE-2026-109618/109619 or any PHP RCE.
+  PHP workers should rarely spawn sh/bash/dash directly.
+references:
+  - https://www.php.net/archive/2026.php#2026-10-20-1
+author: MogheeZ (infosec@tkxel.com)
+date: 2026/10/21
+tags:
+  - attack.execution
+  - attack.t1059.004
+  - cve.2026.109618
+  - cve.2026.109619
+logsource:
+  category: process_creation
+  product: linux
+detection:
+  selection_parent:
+    ParentImage|endswith:
+      - '/php-fpm'
+      - '/php'
+      - '/php-cgi'
+      - '/php8.4-fpm'
+      - '/php8.3-fpm'
+      - '/php8.2-fpm'
+    ParentCommandLine|contains:
+      - 'php-fpm'
+  selection_child:
+    Image|endswith:
+      - '/sh'
+      - '/bash'
+      - '/dash'
+      - '/zsh'
+      - '/python'
+      - '/python3'
+      - '/perl'
+      - '/ruby'
+      - '/nc'
+      - '/ncat'
+      - '/curl'
+      - '/wget'
+  condition: selection_parent and selection_child
+falsepositives:
+  - PHP scripts that legitimately exec shell commands (image processing, system utilities)
+  - Cron jobs triggered via PHP CLI
+level: high
