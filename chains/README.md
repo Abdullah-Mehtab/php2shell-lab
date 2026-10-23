@@ -1,57 +1,50 @@
 # Attack Chains
 
-CVE-2026-109618 and CVE-2026-109619 ("php2shell") affect PHP's core, reachable through the `session.upload_progress` attack surface. The vulnerable code is in `ext/session/session.c` and `ext/standard/var_unserializer.re`. Research has identified multiple attack paths.
+CVE-2026-109618 and CVE-2026-109619 affect PHP's session upload progress handler (`ext/session/session.c`). The vulnerable code path is reachable through `session.upload_progress`, which is enabled by default in all PHP installations since 5.4.
 
-## Chain 1: Session Injection + LFI (Known since 2018)
+## Chain 1: Session Injection + LFI (2018)
 
 **Directory:** `chain1_session_lfi/`
-**Novelty:** Known since 2018 (Orange Tsai, HITCON CTF)
+**CVE:** Pre-CVE (Orange Tsai, HITCON CTF 2018)
 **Requires:** LFI vulnerability in target application
-**Reliability:** Deterministic (cleanup=Off) or probabilistic race (cleanup=On)
+**Reliability:** Deterministic (cleanup=Off) or race condition (cleanup=On)
 
-The upload progress handler writes the multipart filename into a session file without sanitization. Combined with an LFI vulnerability, this yields RCE. This technique predates the CVEs but uses the same code path.
+The upload progress handler writes the multipart filename into a session file without sanitization. Combined with an LFI vulnerability, this yields RCE. This is a known technique that predates the CVEs but uses the same code path.
 
-**This is what our lab demonstrates end-to-end with working RCE.**
-
-## Chain 2: OOM Corruption (CVE-2026-109618)
+## Chain 2: OOM Corruption RCE (CVE-2026-109618)
 
 **Directory:** `chain2_oom/`
-**Novelty:** The actual novel vulnerability
-**Requires:** Nothing beyond default PHP config (no application bug needed)
-**SAPI:** mod_php is highest risk; FPM susceptible after successful startup
-**Reliability:** Requires build-specific heap calibration; memory disclosure is reliable on calibrated builds
+**CVE:** CVE-2026-109618 (GHSA-w8hw-w9fx-j79w)
+**Requires:** Default PHP config + `post_max_size >= memory_limit + 12M`
+**Reliability:** Reliable with build-specific calibration
 
-When PHP hits `memory_limit` during multipart processing, `longjmp()` skips cleanup, leaving session progress structures with stale pointers. The next request on the same Apache worker reads the stale PS(id), causing the PHPSESSID Set-Cookie header to contain heap memory.
+When PHP hits `memory_limit` during multipart processing, `longjmp()` skips cleanup, leaving stale pointers in session progress structures. The next request on the same Apache worker leaks heap memory via the PHPSESSID cookie, enabling ASLR bypass and RCE.
 
-**Our lab has a verified full RCE PoC:** `poc_rce.py` chains all three stages -- heap leak for ASLR bypass, then fake HashTable pDestructor hijack to zif_system. Tested 3/3 reliable on php:8.4.26-apache (mod_php, single-worker prefork). Negative control on 8.4.27 confirmed (OOM triggers but no disclosure, no RCE). `poc_info_leak.py` demonstrates stages 1+2 (info disclosure) independently.
+**This is the primary contribution of this repository.** Verified full RCE via three-stage chain: heap base leak, libphp.so base leak, fake HashTable pDestructor hijack. See `chain2_oom/README.md`.
 
 ## Chain 3: Stale Global State (CVE-2026-109619)
 
 **Directory:** `chain3_stale_state/`
-**Novelty:** Novel (2026)
-**Requires:** Persistent worker process (mod_php or FPM with max_requests > 1)
-**Confirmed paths:** Session upload progress, fatal_error_backtraces (PHP 8.5)
+**CVE:** CVE-2026-109619 (GHSA-6wmf-4rv5-p3rp)
+**Requires:** Persistent worker process (mod_php or FPM with `max_requests > 1`)
+**Reliability:** Trigger demonstrated, not weaponized
 
-State from one request survives into the next on the same worker after a fatal error interrupts cleanup. The upload progress handler consumes stale decoder state before normal initialization.
-
-**Our lab provides a cross-request stale state demonstration.**
+Global state from one request survives into the next on the same worker after a fatal error interrupts cleanup. Multiple producers (OOM, `max_execution_time`, parse failures) and consumers (INI diagnostics, session upload_progress).
 
 ## Chain 4: Handler Mismatch (Deserialization)
 
 **Directory:** `chain4_handler_mismatch/`
-**Novelty:** Documented alongside the CVEs
+**CVE:** Related to CVE-2026-109619
 **Requires:** Directories with different `session.serialize_handler` + exploitable gadget chain
 **Reliability:** Deterministic if prerequisites met
 
-A pipe in the upload filename causes the `php` handler to deserialize attacker data when another directory uses `php_serialize`. `__destruct` fires even on decode failure.
+A pipe in the upload filename causes the `php` handler to deserialize attacker-controlled data when another directory uses `php_serialize`. This triggers `__destruct` on arbitrary objects.
 
-**Placeholder -- lab not yet built.**
+## Summary
 
-## Honest framing
-
-- **Chain 1** is a 2018 technique (Orange Tsai). We label it as such. It requires an LFI in the target application.
-- **Chain 2** has a verified full RCE PoC (ASLR bypass via PHPSESSID heap leak + fake HashTable pDestructor hijack). This is the genuine CVE-2026-109618 vulnerability. The exploit handles multi-worker Apache prefork (auto-detects and pins workers), auto-detects memory_limit, auto-calibrates heap grooming parameters at runtime, and ships with offset profiles for several php:*-apache builds. Verified on 1, 5, and 10 worker configurations.
-- **Chain 3** is demonstrable as a trigger (OOM on mod_php, crash on FPM) but not yet weaponized.
-- **Chain 4** is a placeholder.
-
-Our contribution: a working full RCE PoC for the novel CVE, ASAN UAF verification, mitigation verification suite, mod_php lab, nginx buffering analysis, and detection rules.
+| Chain | CVE | Auth required | App vuln required | SAPI | Status |
+|-------|-----|---------------|-------------------|------|--------|
+| 1 | Pre-CVE | No | Yes (LFI) | Any | Working PoC |
+| 2 | CVE-2026-109618 | No | No | mod_php only | Verified RCE |
+| 3 | CVE-2026-109619 | No | No | mod_php, FPM | Trigger demo |
+| 4 | Related | No | No (needs config) | Any | Research notes |

