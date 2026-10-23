@@ -8,9 +8,10 @@ Two critical (CVSS 9.2) use-after-free vulnerabilities in PHP's core, affecting 
 
 ## What this repo is
 
+- A verified CVE-2026-109618 information disclosure PoC: ASLR bypass via PHPSESSID cookie heap leak (stages 1 and 2 of the exploit chain)
 - Docker labs (nginx+FPM and Apache mod_php) to safely reproduce the attack surface
-- OOM trigger and stale-state demonstrations for the actual CVEs
 - A working Chain 1 PoC (session injection + LFI, the 2018 technique) for educational comparison
+- ASAN verification of the var_destroy reentry UAF
 - A mitigation verification suite that tests whether your defenses work
 - Detection rules (Sigma, Suricata) for blue teams
 - An analysis of nginx `fastcgi_request_buffering` and its effect on exploitability
@@ -18,7 +19,7 @@ Two critical (CVSS 9.2) use-after-free vulnerabilities in PHP's core, affecting 
 
 ## What this repo is NOT
 
-- A weaponized exploit for either CVE (no heap spray, no RIP control)
+- A full RCE exploit (stage 3 -- fake HashTable to redirect pDestructor -- is not included)
 - A "push button, get shell" tool
 
 ## Quick start
@@ -34,8 +35,9 @@ docker-compose -f docker-compose.modphp.yml up -d
 # Chain 1 PoC: session injection + LFI (2018 technique, requires LFI)
 python3 chains/chain1_session_lfi/race.py id
 
-# Chain 2: OOM trigger (CVE-2026-109618, against mod_php lab)
-python3 chains/chain2_oom/trigger_oom.py --port 8899
+# Chain 2: ASLR bypass via PHPSESSID heap leak (CVE-2026-109618)
+# Requires: modphp-vuln container (8.4.26, single-worker, 8M memory_limit)
+python3 chains/chain2_oom/poc_info_leak.py 8896
 
 # Chain 3: Stale state demo (CVE-2026-109619, against mod_php lab)
 python3 chains/chain3_stale_state/stale_state_demo.py --port 8899
@@ -106,7 +108,7 @@ php2shell-lab/
 | Chain | CVE | Technique | Requires |
 |-------|-----|-----------|----------|
 | 1. Session injection + LFI | Pre-CVE (2018) | Filename injection into session file | LFI in target app |
-| 2. OOM corruption | CVE-2026-109618 | longjmp() skips cleanup on OOM | Nothing (default config) |
+| 2. OOM corruption | CVE-2026-109618 | longjmp() skips cleanup on OOM; heap leak via PHPSESSID | Nothing (default config) |
 | 3. Stale global state | CVE-2026-109619 | Cross-request UAF in persistent workers | Nothing (default config) |
 | 4. Handler mismatch | Related | Serializer deserialization via .user.ini mismatch | Mismatched handlers + gadget chain |
 
@@ -145,7 +147,7 @@ See [mitigations/README.md](mitigations/README.md) for verification tests.
 | mikensec/php2shell-lab | Offline analysis + YARA/Sigma | Live PoC + OOM trigger + stale state demo |
 | RemiPelloux/php-session-upload-progress-uaf | Heap layout study + exposure scanner | Mitigation verification + mod_php lab |
 
-Our contribution: OOM trigger demonstration, stale-state demo, mitigation verification suite, mod_php lab (highest risk SAPI), nginx buffering analysis, and honest labeling of old vs. new techniques.
+Our contribution: verified CVE-2026-109618 info disclosure PoC (ASLR bypass via PHPSESSID heap leak), ASAN UAF verification, OOM trigger and stale-state demos, mitigation verification suite, mod_php lab (highest risk SAPI), nginx buffering analysis, and honest labeling of old vs. new techniques.
 
 ## Credits
 
