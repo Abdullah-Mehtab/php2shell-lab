@@ -23,7 +23,7 @@ The upload progress handler writes the multipart filename into a session file wi
 
 When PHP hits `memory_limit` during multipart processing, `longjmp()` skips cleanup, leaving session progress structures with stale pointers. The next request on the same Apache worker reads the stale PS(id), causing the PHPSESSID Set-Cookie header to contain heap memory.
 
-**Our lab has a verified ASLR bypass PoC:** `poc_info_leak.py` leaks both the Zend MM chunk base (4096-byte cookie) and the libphp.so load base (16-byte cookie). Tested 6/6 reliable on php:8.4.26-apache. Negative control on 8.4.27 confirmed (no leak).
+**Our lab has a verified full RCE PoC:** `poc_rce.py` chains all three stages -- heap leak for ASLR bypass, then fake HashTable pDestructor hijack to zif_system. Tested 3/3 reliable on php:8.4.26-apache (mod_php, single-worker prefork). Negative control on 8.4.27 confirmed (OOM triggers but no disclosure, no RCE). `poc_info_leak.py` demonstrates stages 1+2 (info disclosure) independently.
 
 ## Chain 3: Stale Global State (CVE-2026-109619)
 
@@ -50,8 +50,8 @@ A pipe in the upload filename causes the `php` handler to deserialize attacker d
 ## Honest framing
 
 - **Chain 1** is a 2018 technique (Orange Tsai). We label it as such. It requires an LFI in the target application.
-- **Chain 2** has a verified information disclosure PoC (ASLR bypass via PHPSESSID heap leak). This is the genuine CVE-2026-109618 vulnerability. The full RCE chain (stage 3: fake HashTable to redirect pDestructor to zif_system) requires additional per-build calibration not included here.
+- **Chain 2** has a verified full RCE PoC (ASLR bypass via PHPSESSID heap leak + fake HashTable pDestructor hijack). This is the genuine CVE-2026-109618 vulnerability. The exploit requires per-build heap calibration values (included for php:8.4.26-apache bookworm-amd64). ~60% of container restarts produce a compatible heap state; the exploit retries across restarts.
 - **Chain 3** is demonstrable as a trigger (OOM on mod_php, crash on FPM) but not yet weaponized.
 - **Chain 4** is a placeholder.
 
-Our contribution: a working info disclosure PoC for the novel CVE, ASAN UAF verification, mitigation verification suite, mod_php lab, nginx buffering analysis, and detection rules.
+Our contribution: a working full RCE PoC for the novel CVE, ASAN UAF verification, mitigation verification suite, mod_php lab, nginx buffering analysis, and detection rules.

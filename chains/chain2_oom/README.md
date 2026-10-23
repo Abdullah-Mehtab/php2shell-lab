@@ -8,6 +8,35 @@ When PHP hits `memory_limit` during multipart request processing, `longjmp()` ab
 
 ## What we have
 
+### Full RCE PoC (`poc_rce.py`)
+
+A working, verified unauthenticated RCE exploit. Three stages, each a pair of HTTP requests to the same Apache worker:
+
+**Stage 1 -- Zend MM chunk base leak:** (same as info leak below)
+**Stage 2 -- libphp.so base leak:** (same as info leak below)
+**Stage 3 -- RCE via fake HashTable:**
+1. Request A: OOM trigger with calibrated padding (6 x 31B pad fields + Cookie header for valid PS(id))
+2. Request B: Carrier spray (bin-40 grooming + 15 x 167B fake HashTable with pDestructor = zif_system)
+3. Result: Session cleanup calls pDestructor on the fake HT, executing `system(cmd)` as www-data
+
+```bash
+# Full RCE (writes proof to /tmp/pwned inside the container)
+python3 poc_rce.py 8896 "id>/tmp/pwned"
+
+# Output:
+#   [1/3] Leak Zend MM chunk base
+#     [+] chunk_base = 0x7f5375e00000
+#   [2/3] Leak libphp.so base
+#     [+] libphp_base = 0x7f53779df000
+#   [3/3] RCE
+#     [+] RCE CONFIRMED: uid=33(www-data) gid=33(www-data) groups=33(www-data)
+```
+
+**Verified:** 3/3 runs on php:8.4.26-apache (amd64), single-worker prefork. First spray attempt each time.
+**Negative control:** PHP 8.4.27 triggers OOM but ZEND_HAS_OOM checks prevent disclosure. No RCE.
+**Heap calibration:** ~60% of container restarts produce a compatible heap state for the bookworm profile values. The exploit retries across restarts.
+**Max command length:** 14 bytes (limited by the 167-byte fake HashTable structure).
+
 ### Information disclosure PoC (`poc_info_leak.py`)
 
 A working, verified ASLR bypass via PHPSESSID cookie memory disclosure. Two stages, each a pair of HTTP requests to the same Apache worker:
@@ -84,9 +113,13 @@ The info disclosure PoC requires:
 
 These are laboratory conditions. The heap calibration values are specific to this exact libphp.so build.
 
-## What this is NOT
+## Heap calibration
 
-This PoC demonstrates the information disclosure primitive (ASLR bypass via heap leak). The full RCE chain adds a stage 3 that constructs a fake HashTable to redirect pDestructor to zif_system. Stage 3 requires additional per-build heap calibration not included here.
+The exploit requires per-build calibration values that determine the exact grooming field counts, sub-array indices, and padding needed to place the fake HashTable at the right heap offset. The values in this repo are calibrated for `php:8.4.26-apache` (bookworm-amd64, libphp.so SHA256 51663cf8...).
+
+PHP's hash randomization (random seed per process start) changes the allocation order within the heap. Not every container restart produces a compatible heap state. With the bookworm profile values, approximately 60% of restarts work. The exploit handles this by retrying across container restarts.
+
+Different PHP builds (different distro, different compile flags, different version) need different calibration values. The devploit/php2shell project maintains profiles for several builds.
 
 ## Profile values (php-8.4.26-bookworm-amd64)
 
