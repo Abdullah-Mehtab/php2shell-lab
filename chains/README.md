@@ -50,7 +50,7 @@ A pipe in the upload filename causes the `php` handler to deserialize attacker d
 ## Honest framing
 
 - **Chain 1** is a 2018 technique (Orange Tsai). We label it as such. It requires an LFI in the target application.
-- **Chain 2** has a verified full RCE PoC (ASLR bypass via PHPSESSID heap leak + fake HashTable pDestructor hijack). This is the genuine CVE-2026-109618 vulnerability. The exploit requires per-build heap calibration values (included for php:8.4.26-apache bookworm-amd64). ~60% of container restarts produce a compatible heap state; the exploit retries across restarts.
+- **Chain 2** has a verified full RCE PoC (ASLR bypass via PHPSESSID heap leak + fake HashTable pDestructor hijack). This is the genuine CVE-2026-109618 vulnerability. The exploit handles multi-worker Apache prefork (auto-detects and pins workers), auto-detects memory_limit, auto-calibrates heap grooming parameters at runtime, and ships with offset profiles for several php:*-apache builds. Verified on 1, 5, and 10 worker configurations.
 - **Chain 3** is demonstrable as a trigger (OOM on mod_php, crash on FPM) but not yet weaponized.
 - **Chain 4** is a placeholder.
 
