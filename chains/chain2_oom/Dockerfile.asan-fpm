@@ -1,0 +1,91 @@
+# Build PHP-FPM with AddressSanitizer to catch OOM-triggered UAF
+#
+# Usage:
+#   docker build -f Dockerfile.asan-fpm -t php-asan-fpm:8.4.26 .
+#   docker run --rm -p 9001:9000 php-asan-fpm:8.4.26
+#
+# Then proxy nginx to port 9001 and send multipart exploits.
+# ASAN reports heap-use-after-free on OOM-triggered cleanup paths.
+
+FROM debian:bookworm-slim AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential autoconf bison re2c pkg-config \
+    libxml2-dev libsqlite3-dev zlib1g-dev libonig-dev \
+    curl ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+ARG PHP_VERSION=8.4.26
+ARG PHP_URL=https://www.php.net/distributions/php-${PHP_VERSION}.tar.gz
+
+WORKDIR /build
+RUN curl -fSL "${PHP_URL}" -o php.tar.gz && tar xzf php.tar.gz
+
+WORKDIR /build/php-${PHP_VERSION}
+RUN CC=gcc CFLAGS="-fsanitize=address -fno-omit-frame-pointer -g -O1" \
+    LDFLAGS="-fsanitize=address" \
+    ./configure \
+        --enable-debug \
+        --enable-fpm \
+        --with-fpm-user=www-data \
+        --with-fpm-group=www-data \
+        --enable-session \
+        --enable-filter \
+        --enable-mbstring \
+        --with-zlib \
+        --disable-cgi \
+        --disable-phpdbg && \
+    make -j$(nproc)
+
+FROM debian:bookworm-slim
+ARG PHP_VERSION=8.4.26
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libxml2 libsqlite3-0 zlib1g libasan8 libonig5 && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /build/php-${PHP_VERSION}/sapi/fpm/php-fpm /usr/local/sbin/php-fpm
+COPY --from=builder /build/php-${PHP_VERSION}/sapi/cli/php /usr/local/bin/php
+
+RUN mkdir -p /usr/local/etc/php /usr/local/etc/php-fpm.d /var/www/html /tmp
+
+# php.ini: low memory_limit to trigger OOM easily
+RUN printf '[PHP]\n\
+memory_limit = 8M\n\
+session.upload_progress.enabled = On\n\
+session.upload_progress.cleanup = On\n\
+session.upload_progress.prefix = upload_progress_\n\
+session.upload_progress.name = PHP_SESSION_UPLOAD_PROGRESS\n\
+session.upload_progress.freq = 1%%\n\
+session.upload_progress.min_freq = 1\n\
+session.save_handler = files\n\
+session.save_path = /tmp\n\
+session.name = PHPSESSID\n\
+error_reporting = E_ALL\n\
+display_errors = On\n\
+log_errors = On\n\
+error_log = /dev/stderr\n' > /usr/local/etc/php/php.ini
+
+# php-fpm.conf
+RUN printf '[global]\n\
+error_log = /dev/stderr\n\
+log_level = notice\n\
+daemonize = no\n\
+\n\
+[www]\n\
+user = nobody\n\
+group = nogroup\n\
+listen = 0.0.0.0:9000\n\
+pm = static\n\
+pm.max_children = 2\n\
+pm.max_requests = 0\n\
+catch_workers_output = yes\n\
+decorate_workers_output = no\n' > /usr/local/etc/php-fpm.conf
+
+# phpinfo target
+RUN printf '<?php phpinfo(); ?>' > /var/www/html/index.php
+
+ENV USE_ZEND_ALLOC=0
+ENV ASAN_OPTIONS=detect_leaks=0:halt_on_error=0:print_stacktrace=1:log_path=/tmp/asan
+
+EXPOSE 9000
+CMD ["php-fpm", "--fpm-config", "/usr/local/etc/php-fpm.conf", "-c", "/usr/local/etc/php/php.ini"]

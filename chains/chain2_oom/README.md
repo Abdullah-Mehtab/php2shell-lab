@@ -1,60 +1,106 @@
 # Chain 2: OOM Corruption (CVE-2026-109618)
 
-**Status:** The novel vulnerability. GHSA-w8hw-w9fx-j79w.
+GHSA-w8hw-w9fx-j79w.
 
 ## Root cause
 
-When PHP exhausts `memory_limit` during multipart request processing, it calls `longjmp()` to abort immediately. This skips cleanup code, leaving request-owned memory (bookkeeping zvals, var_hash structures) in a partially-initialized state with dangling pointers. Subsequent request cleanup (RSHUTDOWN) reads and writes through these pointers -- a use-after-free.
+When PHP hits `memory_limit` during multipart request processing, `longjmp()` aborts to a setjmp point, skipping cleanup. Session progress structures retain stale pointers. The next request on the same Apache worker reads these stale pointers, leaking heap memory via the PHPSESSID Set-Cookie header.
 
-This is NOT the same as the `VAR_ENTRIES_MAX` overflow described in some early research. The official advisory (GHSA-w8hw-w9fx-j79w) describes OOM corruption as the root cause.
+## What we have
 
-## SAPI impact
+### Information disclosure PoC (`poc_info_leak.py`)
 
-- **Apache mod_php (highest risk):** Cleanup runs even when request startup fails. RCE is achievable before any application code executes. Confirmed on prefork MPM.
-- **PHP-FPM:** Worker terminates on startup failure (blocks the mod_php path). Susceptible after successful startup when an application operation triggers OOM.
-- **FrankenPHP, php-cgi, LiteSpeed:** Also affected.
+A working, verified ASLR bypass via PHPSESSID cookie memory disclosure. Two stages, each a pair of HTTP requests to the same Apache worker:
 
-## Memory disclosure
+**Stage 1 -- Zend MM chunk base leak:**
+1. Request A: 1001 x 1B fields + null PHPSESSID + upload progress + file + OOM trigger
+2. Request B: 841 grooming fields of 48B + 79B forged zend_string (fakes len=0x1000)
+3. Result: 4096-byte Set-Cookie containing heap pointers; extract 2MB-aligned chunk base
 
-CVE-2026-109618 also enables Heartbleed-style memory disclosure: worker memory (passwords, session tokens, API keys, TLS private keys from other requests) can leak inside `PHPSESSID` response cookies, even without `session_start()`.
+**Stage 2 -- libphp.so base leak:**
+1. Request A: 1001 x 39B fields + null PHPSESSID + upload progress + file + OOM trigger
+2. Request B: 983 fields with sub-array at index 406
+3. Result: 16-byte Set-Cookie containing pDestructor pointer; low 12 bits match zval_ptr_dtor
 
-## Weaponized RCE (not included)
+Together these leak the Zend MM chunk base and the libphp.so load base, defeating ASLR.
 
-Calif demonstrated unauthenticated RCE against 11 major applications (WordPress, Drupal, Joomla, Magento, etc.). The full exploit:
-1. Trigger OOM via crafted multipart to corrupt bookkeeping
-2. Heap spray to reclaim freed bins with attacker-controlled data
-3. Session write-back invokes serialize on a forged object
-4. Attacker controls instruction pointer via fake vtable
-5. Arbitrary code execution as web worker
+```bash
+# Against vulnerable mod_php (8.4.26, single-worker prefork, memory_limit=8M)
+python3 poc_info_leak.py 8896
 
-This requires build-specific heap layout knowledge and is NOT included in this lab.
+# Output:
+#   [+] Zend MM chunk base: 0x7f76f6e00000
+#   [+] libphp.so base:    0x7f76f8f6a000
+#   [+] zif_system:        0x7f76f93cf370
+```
 
-## What we demonstrate
+**Verified:** 6/6 runs on php:8.4.26-apache (amd64), single-worker prefork.
+**Negative control:** PHP 8.4.27 triggers the same OOM but returns a normal 32-byte session ID. No leak.
+
+Build profile: `php-8.4.26-bookworm-amd64` (identical libphp.so SHA256, same offsets as devploit's verified profile).
+
+### ASAN UAF proof (`verify_asan.sh`)
+
+Builds PHP 8.4.26 from source with AddressSanitizer and runs `verify_uaf.php`, which triggers a `var_destroy` reentry UAF. ASAN reports:
+
+```
+heap-use-after-free at php_var_unserialize (var_unserializer.c:849)
+  freed at var_destroy (var_unserializer.c:245)
+```
+
+This is a separate bug from the rfc1867 OOM chain. It fires on both 8.4.26 AND 8.4.27.
+
+```bash
+./verify_asan.sh           # builds and runs against PHP 8.4.26
+./verify_asan.sh 8.4.27    # compare against patched version
+```
 
 ### OOM trigger (`trigger_oom.py`)
 
-Sends a crafted multipart request designed to exhaust `memory_limit`. Observes PHP's crash behavior and checks for memory disclosure in response cookies.
+Sends a multipart request to exhaust `memory_limit`. Demonstrates the trigger condition.
 
 ```bash
-# Against the mod_php lab (Apache)
-python3 trigger_oom.py --host 127.0.0.1 --port 8899
-
-# Against the FPM lab (nginx)
-python3 trigger_oom.py --host 127.0.0.1 --port 8898
+python3 trigger_oom.py --port 8896
 ```
 
-### ASAN verification (`verify_asan.sh`)
+## SAPI behavior
 
-Builds PHP from source with AddressSanitizer to observe the heap UAF. Uses the `unserialize()` var_destroy path (one of multiple UAF triggers described in early research).
+| SAPI | Version | OOM behavior |
+|------|---------|-------------|
+| mod_php | 8.4.26 | 200 OK with OOM error, process survives. Memory disclosure works. |
+| mod_php | 8.4.27 | 200 OK with OOM error, process survives. No memory disclosure. |
+| FPM | 8.4.26 | Worker crashes (exit 70), 502 Bad Gateway. No cross-request chain. |
 
-```bash
-./verify_asan.sh           # PHP 8.4.26
-./verify_asan.sh 8.2.34    # specific version
+## Lab requirements
+
+The info disclosure PoC requires:
+- `php:8.4.26-apache` (mod_php, Apache prefork)
+- Single-worker prefork (`MaxRequestWorkers 1`) for deterministic same-worker targeting
+- `memory_limit = 8M` (the OOM trigger is sized as `memory_limit + 12M`)
+- `post_max_size = 256M` (allow the large OOM body)
+- `display_errors = On`
+- `session.upload_progress.enabled = On`
+- `session.use_strict_mode = 0`
+
+These are laboratory conditions. The heap calibration values are specific to this exact libphp.so build.
+
+## What this is NOT
+
+This PoC demonstrates the information disclosure primitive (ASLR bypass via heap leak). The full RCE chain adds a stage 3 that constructs a fake HashTable to redirect pDestructor to zif_system. Stage 3 requires additional per-build heap calibration not included here.
+
+## Profile values (php-8.4.26-bookworm-amd64)
+
+```
+zif_system     = 0x465370
+zval_ptr_dtor  = 0x65eb60
+stage1_n       = 841
+stage1_forge   = 79
+stage2_t       = 406
+stage2_v       = 16
+oom_margin     = 12 MB
 ```
 
 ## References
 
 - PHP Advisory: GHSA-w8hw-w9fx-j79w
-- CISA Alert: https://www.cisa.gov/news-events/alerts/2026/10/21/critical-vulnerabilities-php-require-immediate-patching
-- Rapid7 ETR: https://www.rapid7.com/blog/post/etr-cve-2026-109618-and-cve-2026-109619/
-- JFrog Research: https://research.jfrog.com/post/php2shell-all-you-need-to-know-about-cve-2026-109618-and-cve-2026-109619/
+- devploit/php2shell build profiles (calibration methodology)
