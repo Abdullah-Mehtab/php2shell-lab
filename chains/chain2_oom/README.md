@@ -12,8 +12,6 @@ When PHP hits `memory_limit` during multipart request processing, `longjmp()` ab
 |------|---------|
 | `poc_rce.py` | Weaponized RCE exploit (stages 1+2+3) with auto-calibration |
 | `poc_info_leak.py` | Information disclosure only (stages 1+2) |
-| `poc_stale_bytes.py` | Alternative exploit: stale post_bytes_processed pointer |
-| `trigger_oom.py` | OOM trigger demonstration |
 | `Dockerfile.asan` | ASAN-instrumented PHP build for UAF verification |
 | `verify_uaf.php` | UAF trigger script for ASAN |
 | `verify_asan.sh` | Build and run ASAN verification |

