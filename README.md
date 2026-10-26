@@ -72,8 +72,9 @@ chains/chain2_oom/
   verify_asan.sh         Build and run ASAN verification
 
 lab/
-  docker-compose.modphp.yml   Apache mod_php (vulnerable)
-  docker-compose.yml          PHP-FPM + nginx
+  docker-compose.modphp.yml   Vulnerable + patched Apache mod_php
+  php-modphp.ini              8M memory_limit, 256M post_max_size
+  prefork.conf                5 prefork workers
   www/                        Target PHP scripts
 ```
 
@@ -107,10 +108,9 @@ Exit codes for `--check`: `0` = VULNERABLE, `1` = NOT VULNERABLE, `2` = INCONCLU
 ```bash
 cd lab/
 docker-compose -f docker-compose.modphp.yml up -d
-# http://127.0.0.1:8896 -- mod_php, 8M memory_limit, 256M post_max_size
+# http://127.0.0.1:8896 -- vulnerable (PHP 8.4.26, 8M memory_limit, 256M post_max_size)
+# http://127.0.0.1:8899 -- patched (latest PHP 8.4, negative control)
 ```
-
-The compose file also starts a patched container on port 8899 for negative control.
 
 ## Credits
 

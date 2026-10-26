@@ -65,7 +65,7 @@ python3 poc_info_leak.py 8896
 --no-calibrate       Skip calibration, use profile defaults
 --extract-offsets    Extract offsets from container's libphp.so
 --php-version X.Y.Z  Override PHP version detection
---docker-cmd CMD     Docker command prefix (default: docker)
+--docker-cmd CMD     Docker command prefix (default: docker, use 'sg docker -c' on Kali)
 ```
 
 ## Three-stage exploit chain
@@ -95,7 +95,7 @@ python3 poc_info_leak.py 8896
 - Apache with mod_php (prefork MPM). FPM workers crash on OOM (exit 70), breaking the cross-request chain.
 - `session.upload_progress.enabled = On` (PHP default)
 - `session.use_strict_mode = 0` (PHP default)
-- Unpatched PHP (< 8.2.35, < 8.3.36, < 8.4.27, < 8.5.12)
+- Unpatched PHP (< 8.2.35, < 8.3.36, < 8.4.27, < 8.5.12; 7.x and 8.1 are EOL and unpatched)
 
 ### The post_max_size gate
 
@@ -122,11 +122,15 @@ Symbol offsets (zif_system, zval_ptr_dtor) are build-specific constants. Shipped
 | Build | Arch | Status |
 |-------|------|--------|
 | 8.4.26 | amd64 | Verified RCE |
-| 8.4.25 | aarch64 | Offsets verified |
+| 8.4.25 | amd64/aarch64 | Offsets verified |
 | 8.5.11 | amd64/aarch64 | Offsets verified |
 | 8.5.10 | aarch64 | Offsets verified |
-| 8.5.0 | amd64 | Offset-only |
-| 8.3.0 | amd64 | Offset-only |
+| 8.3.35 | amd64 | Offsets verified |
+| 8.2.34 | amd64 | Offsets verified |
+| 8.2.33 | amd64 | Offsets verified |
+| 8.1.31 | amd64 | Offsets verified |
+| 7.4.3 | amd64 | Offsets verified |
+| 8.5.0, 8.3.0 | amd64 | Offset-only |
 
 For unlisted builds, use `--extract-offsets --container NAME` to parse offsets from the container's libphp.so.
 

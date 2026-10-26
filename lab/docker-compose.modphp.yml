@@ -1,17 +1,28 @@
-# Apache mod_php variant -- highest risk SAPI for CVE-2026-109618
+# Apache mod_php lab for CVE-2026-109618
 #
-# mod_php runs PHP inside the Apache process. Request cleanup runs
-# even when request startup fails (OOM during multipart parsing),
-# making this the confirmed application-independent RCE path.
+# Creates two containers:
+#   modphp-vuln  (8896) -- PHP 8.4.26, 8M memory_limit, 256M post_max_size
+#   apache-php   (8899) -- PHP 8.4 (latest/patched), negative control
 #
 # Usage:
 #   docker-compose -f docker-compose.modphp.yml up -d
-#   curl http://127.0.0.1:8899/index.php
-#
-# Test with:
-#   python3 ../chains/chain2_oom/trigger_oom.py --port 8899
+#   python3 chains/chain2_oom/poc_rce.py -u http://127.0.0.1:8896/index.php \
+#     -c "id>/tmp/pwned" --container modphp-vuln
 
 services:
+  modphp-vuln:
+    image: php:8.4.26-apache
+    container_name: modphp-vuln
+    volumes:
+      - ./www:/var/www/html:ro
+      - ./php-modphp.ini:/usr/local/etc/php/conf.d/zz-lab.ini
+      - ./prefork.conf:/etc/apache2/mods-available/mpm_prefork.conf
+    ports:
+      - "127.0.0.1:8896:80"
+    environment:
+      - APACHE_RUN_USER=www-data
+      - APACHE_RUN_GROUP=www-data
+
   apache-php:
     image: php:8.4-apache
     volumes:

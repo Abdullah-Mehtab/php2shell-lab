@@ -1045,8 +1045,8 @@ def main() -> int:
                     help="HTTP path to fetch proof from (e.g. /pwned)")
     ap.add_argument("--check", action="store_true",
                     help="vulnerability check only, no exploitation")
-    ap.add_argument("--docker-cmd", default="sg docker -c",
-                    help="docker command prefix")
+    ap.add_argument("--docker-cmd", default="docker",
+                    help="docker command prefix (use 'sg docker -c' on Kali)")
     args = ap.parse_args()
 
     global USE_SSL, SSL_HOST
